@@ -1,0 +1,184 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "description": "For more information: http://aka.ms/cmakepresetsvs",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "installDir": "${sourceDir}/build/${presetName}/install",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "x64-debug",
+      "displayName": "x64 Debug",
+      "description": "Sets debug build type and x64 arch",
+      "inherits": "base",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "x64-release",
+      "displayName": "x64 Release",
+      "description": "Sets release build type",
+      "inherits": "x64-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "x64-release-debug-info",
+      "displayName": "x64 Release With Debug Info",
+      "description": "Sets release build type",
+      "inherits": "x64-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug",
+      "description": "Sets GCC",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux Release",
+      "description": "Sets release build type",
+      "inherits": "linux-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-release-with-debug-info",
+      "displayName": "Linux RelWithDebInfo",
+      "description": "Sets release with debug info build type",
+      "inherits": "linux-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-debug-clang",
+      "displayName": "Linux Debug (Clang)",
+      "description": "Sets debug build using Clang",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-release-clang",
+      "displayName": "Linux Release (Clang)",
+      "description": "Sets release build type using Clang",
+      "inherits": "linux-debug-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-release-with-debug-info-clang",
+      "displayName": "Linux RelDebInfo (Clang)",
+      "description": "Sets release with debug information build type using Clang",
+      "inherits": "linux-debug-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default-build-linux",
+      "displayName": "Default (Linux)",
+      "configurePreset": "linux-debug",
+      "description": "Vanilla build"
+    },
+    {
+      "name": "default-build-linux-release",
+      "displayName": "Release (Linux)",
+      "configurePreset": "linux-release",
+      "description": "Vanilla build"
+    },
+    {
+      "name": "default-build-linux-release-debug-info",
+      "displayName": "Release With Debug Info (Linux)",
+      "configurePreset": "linux-release-with-debug-info",
+      "description": "Vanilla build"
+    },
+
+    {
+      "name": "default-build-linux-clang",
+      "displayName": "Default (Linux + Clang)",
+      "configurePreset": "linux-debug-clang",
+      "description": "Vanilla build using Clang"
+    },
+    {
+      "name": "default-build-linux-clang-release-with-debug-info",
+      "displayName": "Release With Debug Info (Linux + Clang)",
+      "configurePreset": "linux-release-with-debug-info-clang",
+      "description": "Vanilla build using Clang"
+    },
+    {
+      "name": "default-build-windows",
+      "displayName": "Default (Windows)",
+      "configurePreset": "x64-debug",
+      "description": "Vanilla build"
+    },
+    {
+      "name": "verbose-build-linux",
+      "displayName": "Verbose Build (Linux)",
+      "description": "Passes -v to Ninja",
+      "configurePreset": "linux-debug",
+      "nativeToolOptions": [
+        "-v"
+      ]
+    },
+    {
+      "name": "verbose-build-linux-clang",
+      "displayName": "Verbose Build (Linux + Clang)",
+      "description": "Passes -v to Ninja",
+      "configurePreset": "linux-debug-clang",
+      "nativeToolOptions": [
+        "-v"
+      ]
+    },
+    {
+      "name": "verbose-build-windows",
+      "displayName": "Verbose Build (Windows)",
+      "configurePreset": "x64-debug",
+      "inherits": "verbose-build-linux"
+    }
+  ]
+}
