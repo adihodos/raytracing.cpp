@@ -53,6 +53,7 @@ cpmaddpackage("gh:serge-sans-paille/frozen#master")
 cpmaddpackage("gh:bfgroup/Lyra#develop")
 cpmaddpackage("gh:odygrd/quill@7.5.0")
 cpmaddpackage("gh:g-truc/glm#bf71a834948186f4097caa076cd2663c69a10e1e")
+cpmaddpackage("gh:max0x7ba/atomic_queue@1.7.1")
 
 cpmaddpackage(
   NAME
@@ -178,4 +179,5 @@ target_link_libraries(
           ZppBits
           SDL3::SDL3-static
           glm::glm
-          Vulkan::shaderc_combined)
+          Vulkan::shaderc_combined
+          max0x7ba::atomic_queue)

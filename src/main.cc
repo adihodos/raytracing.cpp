@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <latch>
+#include <mutex>
 #include <random>
 #include <ranges>
 #include <system_error>
@@ -37,6 +39,10 @@
 #include <zmq.h>
 #include <zpp_bits.h>
 
+#include <glm/gtx/vec_swizzle.hpp>
+#include <glm/vec2.hpp>
+
+#include <atomic_queue/atomic_queue.h>
 #include <lyra/lyra.hpp>
 
 #include "memory.arena.hpp"
@@ -81,7 +87,7 @@ auto wrap_zmq_call(const char* zmq_fn_name, ZmqFN& zmq_fn, FnArgs&&... args) -> 
                 call_result = std::invoke(std::forward<ZmqFN>(zmq_fn), std::forward<FnArgs>(args)...);
             }
 
-            if (call_result == -1) {
+            if (call_result == -1 && zmq_errno() != EAGAIN) {
                 const int32_t err_zmq = zmq_errno();
                 LOG_ERROR(g_logger, "{} : {} ({})", zmq_fn_name, err_zmq, zmq_strerror(err_zmq));
             }
@@ -232,7 +238,25 @@ struct ThreadQuitMessage {
     uint8_t dummy;
 };
 
-using ThreadPackage = std::variant<ThreadMessageA, ThreadMessageB, WorkerResponse, ThreadQuitMessage>;
+struct RGBA {
+    union {
+        struct {
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+            uint8_t a;
+        };
+        uint32_t color;
+    };
+};
+
+struct RaytracedPixel {
+    uint32_t rtp_x;
+    uint32_t rtp_y;
+    uint32_t rtp_color;
+};
+
+using ThreadPackage = std::variant<RaytracedPixel, ThreadMessageA, ThreadMessageB, WorkerResponse, ThreadQuitMessage>;
 
 constexpr uint32_t kMaxWorkers = 8;
 
@@ -361,6 +385,477 @@ void UILogic::do_ui(UIContext* uictx) {
     nk_end(ctx);
 }
 
+struct RayTracingWorkPackage {
+    glm::u16vec2 pixels_start;
+    glm::u16vec2 pixels_end;
+};
+
+struct RayTracingSetup {
+    uint32_t rts_img_width{1024};
+    uint32_t rts_img_height{1024};
+    std::span<RGBA> rts_backbuffer;
+};
+
+struct MonkaGigaQueue {
+    std::vector<RayTracingWorkPackage> mgq_queue;
+    std::mutex mgq_mtx;
+
+    tl::optional<RayTracingWorkPackage> pop_pkg() {
+        std::lock_guard qlock{mgq_mtx};
+        if (!mgq_queue.empty()) {
+            const RayTracingWorkPackage pkg = mgq_queue.back();
+            mgq_queue.pop_back();
+            return tl::optional{pkg};
+        }
+        return tl::nullopt;
+    }
+
+    void push_packages(std::vector<RayTracingWorkPackage>&& pkgs) {
+        std::lock_guard qlock{mgq_mtx};
+        mgq_queue = std::move(pkgs);
+    }
+};
+
+using RayTracingWorkStealingQueueType = atomic_queue::AtomicQueue2<RayTracingWorkPackage, 4096>;
+
+struct RayTracingWorker {
+    MonkaGigaQueue* _work_queue;
+    RayTracingSetup _rtsetup;
+    uint32_t _workerid;
+    void* _zmq_channel;
+    void* _zmq_poller;
+
+    void worker_loop();
+    void process_tracing_work_package(const RayTracingWorkPackage& pkg);
+};
+
+void RayTracingWorker::worker_loop() {
+
+    int32_t poll_timeout{0};
+    for (bool quit_flag = false; !quit_flag;) {
+
+        zmq_poller_event_t polled_event;
+        const int32_t polled_events_count = WRAP_ZMQ_FUNC(zmq_poller_wait, _zmq_poller, &polled_event, poll_timeout);
+
+        if (polled_events_count == 1 && polled_event.events & ZMQ_POLLIN) {
+            recv_thread_pkg(_zmq_channel).map([&](const ThreadPackage& pkg) {
+                std::visit(VariantVisitor{
+                               [](const ThreadMessageA& msg_a) {
+                                   const ThreadMessageA* a = &msg_a;
+                                   LOG_INFO(g_logger, "Worker {} got msg A : .x = {}, .y = {}, .str = {}", 0, a->x,
+                                            a->y, a->str);
+                               },
+                               [](const ThreadMessageB& msg_b) {
+                                   const ThreadMessageB* b = &msg_b;
+                                   LOG_INFO(g_logger, "Worker {} got msg B: .a = {}, .b = {}, .msg = {} ", 0, b->a,
+                                            b->b, b->msg);
+                               },
+                               [&quit_flag, this](const ThreadQuitMessage) mutable {
+                                   LOG_INFO(g_logger, "Worker {} shutting down ...", _workerid);
+                                   quit_flag = true;
+                               },
+                               [](const WorkerResponse&) {},
+                               [](const RaytracedPixel) {},
+                           },
+                           pkg);
+            });
+        }
+
+        if (quit_flag)
+            break;
+
+        _work_queue->pop_pkg().map_or_else(
+            [this, &poll_timeout](RayTracingWorkPackage work_pkg) {
+                LOG_INFO(g_logger, "Worker {} --> package [ {}x{} ] - [{}x{}]", _workerid, work_pkg.pixels_start.x,
+                         work_pkg.pixels_start.y, work_pkg.pixels_end.x, work_pkg.pixels_end.y);
+                process_tracing_work_package(work_pkg);
+                poll_timeout = 0;
+            },
+            [&poll_timeout]() { poll_timeout = std::clamp(poll_timeout + 25, 0, 500); });
+    }
+}
+
+void RayTracingWorker::process_tracing_work_package(const RayTracingWorkPackage& rtpkg) {
+    for (uint16_t y = rtpkg.pixels_start.y; y < rtpkg.pixels_end.y; ++y) {
+        for (uint16_t x = rtpkg.pixels_start.x; y < rtpkg.pixels_end.x; ++x) {
+
+            const RGBA pixel_color{.r = 128, .g = 255, .b = 0, .a = 255};
+            send_thread_pkg(this->_zmq_channel, RaytracedPixel{
+                                                    .rtp_x = x,
+                                                    .rtp_y = y,
+                                                    .rtp_color = pixel_color.color,
+                                                });
+
+            // _rtsetup.rts_backbuffer[y * _rtsetup.rts_img_width + x] = RGBA{.r = 128, .g = 255, .b = 0, .a = 255};
+        }
+    }
+}
+
+struct RayTracingWorkerContext {
+    std::thread rtwc_thread;
+    void* rtwc_channel;
+};
+
+class RayTracer {
+private:
+    struct PrivateConstructionToken {};
+
+public:
+    RayTracer(PrivateConstructionToken, glm::u16vec2 img_size, void* zmq_ctx, void* zmq_poller,
+              std::vector<RayTracingWorkerContext> worker_ctx, std::vector<RGBA> backbuffer,
+              std::unique_ptr<MonkaGigaQueue> work_queue)
+        : _imgsize{img_size}, _zmq_context{zmq_ctx}, _zmq_poller{zmq_poller}, _backbuffer{std::move(backbuffer)},
+          _workqueue{std::move(work_queue)}, _worker_context{std::move(worker_ctx)} {}
+
+    ~RayTracer();
+    RayTracer(const RayTracer&) = delete;
+    RayTracer& operator=(const RayTracer&) = delete;
+
+    RayTracer(RayTracer&& rhs) noexcept
+        : _imgsize{rhs._imgsize}, _zmq_context{std::exchange(rhs._zmq_context, nullptr)},
+          _zmq_poller{std::exchange(rhs._zmq_poller, nullptr)},
+
+          _backbuffer{std::move(rhs._backbuffer)}, _workqueue{std::move(rhs._workqueue)},
+          _worker_context{std::move(rhs._worker_context)} {}
+
+    static tl::optional<RayTracer> create(glm::u16vec2 output_img_size);
+    void update(std::span<RGBA> backbuffer);
+    void shutdown();
+    std::span<const RGBA> backbuffer() const noexcept { return std::span{_backbuffer}; }
+
+private:
+    glm::u16vec2 _imgsize;
+    void* _zmq_context;
+    void* _zmq_poller;
+    std::vector<RGBA> _backbuffer;
+    std::unique_ptr<MonkaGigaQueue> _workqueue;
+    std::vector<RayTracingWorkerContext> _worker_context;
+};
+
+RayTracer::~RayTracer() {
+    std::ranges::for_each(_worker_context, [](RayTracingWorkerContext& worker) {
+        worker.rtwc_thread.join();
+        WRAP_ZMQ_FUNC(zmq_close, worker.rtwc_channel);
+    });
+
+    if (_zmq_poller) {
+        WRAP_ZMQ_FUNC(zmq_poller_destroy, &_zmq_poller);
+    }
+    if (_zmq_context) {
+        WRAP_ZMQ_FUNC(zmq_ctx_destroy, _zmq_context);
+    }
+}
+
+template <typename T>
+    requires std::is_integral_v<T>
+T round_up(const T value, const T multiple) noexcept {
+    return ((value + multiple - 1) / multiple) * multiple;
+}
+
+tl::optional<RayTracer> RayTracer::create(glm::u16vec2 img_size) {
+    int32_t z_major{};
+    int32_t z_minor{};
+    int32_t z_patch{};
+    zmq_version(&z_major, &z_minor, &z_patch);
+
+    LOG_INFO(g_logger, "ZMQ version {}.{}.{}", z_major, z_minor, z_patch);
+
+    void* ctx_main = WRAP_ZMQ_FUNC(zmq_ctx_new);
+    if (!ctx_main) {
+        return tl::nullopt;
+    }
+
+    void* poller = WRAP_ZMQ_FUNC(zmq_poller_new);
+    if (!poller) {
+        return tl::nullopt;
+    }
+
+    const glm::uvec2 rounded_img_size{round_up<uint32_t>(img_size.x, 8), round_up<uint32_t>(img_size.y, 8)};
+    std::vector<RGBA> backbuffer{
+        static_cast<size_t>(img_size.x * img_size.y),
+        RGBA{.r = 0, .g = 255, .b = 0, .a = 255},
+    };
+
+    const auto cpus = std::min<uint32_t>(std::thread::hardware_concurrency(), 8);
+    constexpr uint32_t BLOCK_SIZE = 8;
+
+    const glm::uvec2 pkgs_count = rounded_img_size / uint32_t{8};
+    std::vector<RayTracingWorkPackage> work_queue_pkgs{};
+    work_queue_pkgs.reserve(pkgs_count.x * pkgs_count.y);
+    for (uint32_t y = 0; y < pkgs_count.y; ++y) {
+        for (uint32_t x = 0; x < pkgs_count.x; ++x) {
+            work_queue_pkgs.push_back(RayTracingWorkPackage{
+                .pixels_start =
+                    glm::u16vec2{std::min<uint16_t>((x * 8), img_size.x), std::min<uint16_t>((y * 8), img_size.y)},
+                .pixels_end = glm::u16vec2{std::min<uint16_t>((x + 1) * 8, img_size.x),
+                                           std::min<uint16_t>((y + 1) * 8, img_size.y)},
+            });
+        }
+    }
+
+    std::unique_ptr<MonkaGigaQueue> work_queue{std::make_unique<MonkaGigaQueue>()};
+    work_queue->push_packages(std::move(work_queue_pkgs));
+
+    std::latch workers_rdy{cpus};
+    const RayTracingSetup rtsetup{
+        .rts_img_width = img_size.x,
+        .rts_img_height = img_size.y,
+        .rts_backbuffer = std::span{backbuffer},
+    };
+    std::vector<RayTracingWorkerContext> worker_ctx{};
+    for (uint32_t idx = 0; idx < cpus; ++idx) {
+        void* chan_to_worker = WRAP_ZMQ_FUNC(zmq_socket, ctx_main, ZMQ_CHANNEL);
+
+        char tmp_buffer[128];
+        auto fres = fmt::format_to(tmp_buffer, "inproc://worker.{}", idx);
+        *fres.out = 0;
+
+        if (const int32_t bind_res = WRAP_ZMQ_FUNC(zmq_bind, chan_to_worker, tmp_buffer); bind_res != 0) {
+            return tl::nullopt;
+        }
+
+        if (const int32_t add_res =
+                WRAP_ZMQ_FUNC(zmq_poller_add, poller, chan_to_worker, reinterpret_cast<void*>(idx), ZMQ_POLLIN);
+            add_res != 0) {
+            return tl::nullopt;
+        }
+
+        void* chan_from_worker = WRAP_ZMQ_FUNC(zmq_socket, ctx_main, ZMQ_CHANNEL);
+        if (const int32_t conn_res = WRAP_ZMQ_FUNC(zmq_connect, chan_from_worker, tmp_buffer)) {
+            return tl::nullopt;
+        }
+
+        void* worker_poller = WRAP_ZMQ_FUNC(zmq_poller_new);
+        if (!worker_poller) {
+            return tl::nullopt;
+        }
+
+        if (const int32_t add_res = WRAP_ZMQ_FUNC(zmq_poller_add, worker_poller, chan_from_worker, nullptr, ZMQ_POLLIN);
+            add_res != 0) {
+            return tl::nullopt;
+        }
+
+        worker_ctx.emplace_back(
+            std::thread{[&workers_rdy, wqueue = work_queue.get(), worker_poller, chan_from_worker, idx, &rtsetup]() {
+                RayTracingWorker worker{
+                    ._work_queue = wqueue,
+                    ._rtsetup = rtsetup,
+                    ._workerid = idx,
+                    ._zmq_channel = chan_from_worker,
+                    ._zmq_poller = worker_poller,
+                };
+                workers_rdy.count_down();
+                worker.worker_loop();
+            }},
+            chan_to_worker);
+    }
+
+    workers_rdy.wait();
+
+    return tl::optional<RayTracer>{
+        tl::in_place,          PrivateConstructionToken{}, img_size, ctx_main, poller, std::move(worker_ctx),
+        std::move(backbuffer), std::move(work_queue),
+    };
+}
+
+void RayTracer::update(std::span<RGBA> backbuffer) {
+    for (uint32_t events_processed = 0; events_processed < 128; ++events_processed) {
+        zmq_poller_event_t poll_ev;
+        const int32_t ev_count = WRAP_ZMQ_FUNC(zmq_poller_wait, _zmq_poller, &poll_ev, 0);
+        if (ev_count != 1)
+            break;
+
+        const size_t worker_idx = reinterpret_cast<size_t>(poll_ev.user_data);
+        RayTracingWorkerContext* wctx = &_worker_context[worker_idx];
+        recv_thread_pkg(wctx->rtwc_channel).map([worker_idx, backbuffer, width = _imgsize.x](ThreadPackage pkg) {
+            std::visit(VariantVisitor{
+                           [](const ThreadMessageA& msg_a) {},
+                           [](const ThreadMessageB& msg_b) {},
+                           [](const ThreadQuitMessage) {},
+                           [](const WorkerResponse&) {},
+                           [backbuffer, width](const RaytracedPixel pixel) {
+                               LOG_INFO(g_logger, "pixel done: {}x{} -> {:#0x}", pixel.rtp_x, pixel.rtp_y,
+                                        pixel.rtp_color);
+                               backbuffer[pixel.rtp_y * width + pixel.rtp_x] = RGBA{.color = pixel.rtp_color};
+                           },
+                       },
+                       pkg);
+        });
+    }
+}
+
+void RayTracer::shutdown() {
+    LOG_INFO(g_logger, "Shutting down ...");
+    std::ranges::for_each(_worker_context, [](const RayTracingWorkerContext& ctx) {
+        send_thread_pkg(ctx.rtwc_channel, ThreadQuitMessage{});
+    });
+    std::ranges::for_each(_worker_context, [](RayTracingWorkerContext& ctx) { ctx.rtwc_thread.join(); });
+}
+
+struct alignas(16) RayTracedImageSSBOData {
+    uint32_t rti_width;
+    uint32_t rti_height;
+    RGBA* rti_pixels;
+};
+
+class RayTracedImageDisplay {
+private:
+    struct PrivateConstructionToken {};
+
+public:
+    static tl::optional<RayTracedImageDisplay> create(glm::uvec2 img_size);
+
+    RayTracedImageDisplay(glm::uvec2 img_size, GLuint vao, GLuint pipeline, GLuint vertex_prog, GLuint frag_prog,
+                          GLuint ssbo, RayTracedImageSSBOData* ssbo_ptr) noexcept
+        : rtid_imgsize{img_size}, rtid_vao{vao}, rtid_pipeline{pipeline}, rtid_vertexprog{vertex_prog},
+          rtid_fragprog{frag_prog}, rtid_pixelsbuffer{ssbo}, rtid_ssboptr{ssbo_ptr} {}
+
+    RayTracedImageDisplay(RayTracedImageDisplay&& rhs) noexcept
+        : rtid_imgsize{rhs.rtid_imgsize}, rtid_vao{std::exchange(rhs.rtid_vao, 0)},
+          rtid_pipeline{std::exchange(rhs.rtid_pipeline, 0)}, rtid_vertexprog{std::exchange(rhs.rtid_vertexprog, 0)},
+          rtid_fragprog{std::exchange(rhs.rtid_fragprog, 0)},
+          rtid_pixelsbuffer{std::exchange(rhs.rtid_pixelsbuffer, 0)},
+          rtid_ssboptr{std::exchange(rhs.rtid_ssboptr, nullptr)} {}
+
+    RayTracedImageDisplay(const RayTracedImageDisplay&) = delete;
+    RayTracedImageDisplay& operator=(const RayTracedImageDisplay&) = delete;
+
+    ~RayTracedImageDisplay() noexcept {
+        if (rtid_vao)
+            glDeleteVertexArrays(1, &rtid_vao);
+        if (rtid_pipeline)
+            glDeleteProgramPipelines(1, &rtid_pipeline);
+    }
+
+    std::span<RGBA> backbuffer() noexcept {
+        return std::span<RGBA>{rtid_ssboptr->rti_pixels, rtid_imgsize.x * rtid_imgsize.y};
+    }
+
+    void write_pixel(RGBA pixel, const uint32_t x, const uint32_t y) {
+        rtid_ssboptr->rti_pixels[y * rtid_imgsize.x + x] = pixel;
+    }
+
+    void set_image_size(glm::uvec2 img_size) {
+        rtid_imgsize = img_size;
+        rtid_ssboptr->rti_width = img_size.x;
+        rtid_ssboptr->rti_height = img_size.y;
+    }
+
+    void draw() {
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, rtid_pixelsbuffer);
+        glBindProgramPipeline(rtid_pipeline);
+        glBindVertexArray(rtid_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, 0);
+    }
+
+private:
+    glm::uvec2 rtid_imgsize{};
+    GLuint rtid_vao{};
+    GLuint rtid_pipeline{};
+    GLuint rtid_vertexprog{};
+    GLuint rtid_fragprog{};
+    GLuint rtid_pixelsbuffer{};
+    RayTracedImageSSBOData* rtid_ssboptr{};
+};
+
+tl::optional<RayTracedImageDisplay> RayTracedImageDisplay::create(glm::uvec2 img_size) {
+    GLuint pixel_buffer{};
+    glCreateBuffers(1, &pixel_buffer);
+    const GLsizeiptr buffer_size =
+        static_cast<GLsizeiptr>(sizeof(RayTracedImageSSBOData) + img_size.x * img_size.y * sizeof(RGBA));
+    glNamedBufferStorage(pixel_buffer, buffer_size, nullptr,
+                         GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+    RayTracedImageSSBOData* gpu_buffer = static_cast<RayTracedImageSSBOData*>(glMapNamedBufferRange(
+        pixel_buffer, 0, buffer_size, GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT));
+
+    if (!gpu_buffer) {
+        LOG_CRITICAL(g_logger, "Failed to map GPU buffer for image data!");
+        return tl::nullopt;
+    }
+
+    gpu_buffer->rti_height = img_size.y;
+    gpu_buffer->rti_width = img_size.x;
+
+    GLuint vao{};
+    glCreateVertexArrays(1, &vao);
+
+    static constexpr const char* VTX_SHADER_CODE = R"#(
+#version 460 core
+//
+// see https://trass3r.github.io/coding/2019/09/11/bufferless-rendering.html
+
+layout (location = 0) out gl_PerVertex {
+    vec4 gl_Position;
+};
+
+void main() {
+    const vec2 pos = vec2(gl_VertexID % 2, gl_VertexID / 2) * 4.0 - 1.0;
+    gl_Position = vec4(pos, 0.0, 1.0);
+}
+)#";
+
+    constexpr const char* const FRAG_SHADER_CODE = R"#(
+#version 460 core
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout (std430, binding = 0) readonly buffer RayTracedImageSSBO {
+    uint width;
+    uint height;
+    uint pixels[];
+};
+
+layout (location = 0) out vec4 FinalFragColor;
+
+void main() {
+    const uint pixel_idx = uint(gl_FragCoord.y) * width + uint(gl_FragCoord.x);
+    const uint pixel_color = pixels[pixel_idx];
+    FinalFragColor = unpackUnorm4x8(pixel_color);
+}
+)#";
+
+    GLuint pipeline{};
+    glCreateProgramPipelines(1, &pipeline);
+    GLuint gpu_programs[2]{};
+
+    constexpr const std::tuple<const char*, const char*, GLbitfield, GLenum, shaderc_shader_kind, const char*>
+        shader_create_data[] = {
+            {
+                VTX_SHADER_CODE,
+                "main",
+                GL_VERTEX_SHADER_BIT,
+                GL_VERTEX_SHADER,
+                shaderc_vertex_shader,
+                "ui_vertex_shader",
+            },
+            {
+                FRAG_SHADER_CODE,
+                "main",
+                GL_FRAGMENT_SHADER_BIT,
+                GL_FRAGMENT_SHADER,
+                shaderc_fragment_shader,
+                "ui_fragment_shader",
+            },
+        };
+
+    size_t idx{};
+    for (auto [shader_code, entry_point, shader_stage, shader_type, shaderc_kind, shader_id] : shader_create_data) {
+        auto shader_prog =
+            create_gpu_program_from_memory(shader_type, shaderc_kind, shader_id, shader_code, entry_point, {});
+        if (!shader_prog)
+            return tl::nullopt;
+
+        gpu_programs[idx++] = *shader_prog;
+        glUseProgramStages(pipeline, shader_stage, *shader_prog);
+    }
+
+    return tl::optional<RayTracedImageDisplay>{
+        tl::in_place, img_size, vao, pipeline, gpu_programs[0], gpu_programs[1], pixel_buffer, gpu_buffer,
+    };
+}
+
+std::byte kScratchBuffer[32 * 1024 * 1024];
+
 int main(int argc, char** argv) {
 
     // sigset_t signal_set;
@@ -383,21 +878,46 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    const auto image_size = glm::u16vec2{
+        static_cast<glm::uint16>(window->RenderData.surface_size.x),
+        static_cast<glm::uint16>(window->RenderData.surface_size.y),
+    };
+
+    auto raytraced_img_display = RayTracedImageDisplay::create(image_size);
+    if (!raytraced_img_display) {
+        LOG_ERROR(g_logger, "Failed to create image display!");
+        return EXIT_FAILURE;
+    }
+
     auto ui_backend = BackendUI::create(window->handle());
     if (!ui_backend) {
         LOG_ERROR(g_logger, "Failed to create UI backend");
         return EXIT_FAILURE;
     }
 
+    auto raytracer = RayTracer::create(image_size);
+    if (!raytracer) {
+        LOG_ERROR(g_logger, "Failed to create raytracer ...");
+        return EXIT_FAILURE;
+    }
+
+    MemoryArena main_arena{kScratchBuffer, std::size(kScratchBuffer)};
+
     struct MainContext {
         UIContext ui_ctx;
         PlatformWindow* win;
+        RayTracer* raytracer;
         BackendUI* ui_backend;
         UILogic ui_logic;
+        RayTracedImageDisplay* img_display;
+        MemoryArena* arena_main;
     } main_ctx = {
         .ui_ctx = {},
         .win = &*window,
+        .raytracer = &*raytracer,
         .ui_backend = &*ui_backend,
+        .img_display = &*raytraced_img_display,
+        .arena_main = &main_arena,
     };
 
     window->Events.poll_input_start.bind([ctx = &main_ctx](const PlatformWindow::PollInputStartEvent&) {
@@ -420,6 +940,7 @@ int main(int argc, char** argv) {
     });
 
     window->Events.render_event.bind([main = &main_ctx](const DrawParams& dp) {
+        main->raytracer->update(main->img_display->backbuffer());
         main->ui_logic.do_ui(&main->ui_ctx);
 
         glViewportIndexedf(0, 0.0f, 0.0f, static_cast<float>(dp.surface_width), static_cast<float>(dp.surface_height));
@@ -428,10 +949,12 @@ int main(int argc, char** argv) {
         glClearNamedFramebufferfv(0, GL_COLOR, 0, clear_color);
         glClearNamedFramebufferfi(0, GL_DEPTH_STENCIL, 0, 1.0f, 0xff);
 
+        main->img_display->draw();
         main->ui_backend->render(dp);
     });
 
     window->event_loop();
+    main_ctx.raytracer->shutdown();
 
     // std::string runmode;
     // ProgramOptions prog_opts{};
@@ -521,13 +1044,15 @@ int main(int argc, char** argv) {
     //                         std::visit(VariantVisitor{
     //                                        [idx](const ThreadMessageA& msg_a) {
     //                                            const ThreadMessageA* a = &msg_a;
-    //                                            LOG_INFO(g_logger, "Worker {} got msg A : .x = {}, .y = {}, .str =
+    //                                            LOG_INFO(g_logger, "Worker {} got msg A : .x = {}, .y = {},
+    //                                            .str =
     //                                            {}",
     //                                                     idx, a->x, a->y, a->str);
     //                                        },
     //                                        [idx](const ThreadMessageB& msg_b) {
     //                                            const ThreadMessageB* b = &msg_b;
-    //                                            LOG_INFO(g_logger, "Worker {} got msg B: .a = {}, .b = {}, .msg =
+    //                                            LOG_INFO(g_logger, "Worker {} got msg B: .a = {}, .b = {},
+    //                                            .msg =
     //                                            {}",
     //                                                     idx, b->a, b->b, b->msg);
     //                                        },
@@ -539,12 +1064,14 @@ int main(int argc, char** argv) {
     //                                    },
     //                                    pkg);
     //
-    //                         if (const uint32_t reply_chance = reply_chance_distrib(rng); reply_chance >= 85) {
+    //                         if (const uint32_t reply_chance = reply_chance_distrib(rng); reply_chance >= 85)
+    //                         {
     //                             WorkerResponse response;
     //                             response.id = idx;
     //                             response.len = reply_chance;
     //                             auto out =
-    //                                 fmt::format_to(response.payload, "worker_to_server_msg: .id = {}, .chance =
+    //                                 fmt::format_to(response.payload, "worker_to_server_msg: .id = {}, .chance
+    //                                 =
     //                                 {}",
     //                                                idx, reply_chance);
     //                             *out.out = 0;
@@ -558,7 +1085,8 @@ int main(int argc, char** argv) {
     //         z_sock);
     //
     //     poll_handler_contexts.emplace_back(WorkerResponseHandlerContext{.worker_idx = idx});
-    //     WRAP_ZMQ_FUNC(zmq_poller_add, poller, z_sock, reinterpret_cast<void*>(poll_handler_contexts.size() - 1),
+    //     WRAP_ZMQ_FUNC(zmq_poller_add, poller, z_sock, reinterpret_cast<void*>(poll_handler_contexts.size() -
+    //     1),
     //                   ZMQ_POLLIN);
     // }
     //
@@ -567,8 +1095,9 @@ int main(int argc, char** argv) {
     // reinterpret_cast<void*>(poll_handler_contexts.size() - 1),
     //               ZMQ_POLLIN);
     //
-    // poll_handler_contexts.emplace_back(TimerFdHandlerContext{.timerfd = msg_timer, .worker = 0, .expire_count =
-    // 0}); WRAP_ZMQ_FUNC(zmq_poller_add_fd, poller, msg_timer, reinterpret_cast<void*>(poll_handler_contexts.size()
+    // poll_handler_contexts.emplace_back(TimerFdHandlerContext{.timerfd = msg_timer, .worker = 0, .expire_count
+    // = 0}); WRAP_ZMQ_FUNC(zmq_poller_add_fd, poller, msg_timer,
+    // reinterpret_cast<void*>(poll_handler_contexts.size()
     // - 1),
     //               ZMQ_POLLIN);
     //
@@ -637,7 +1166,8 @@ int main(int argc, char** argv) {
     //                                        PackageType");
     //                                        },
     //                                        [](const WorkerResponse& resp) {
-    //                                            LOG_INFO(g_logger, "Srv: response from worker {}: .playload = {}",
+    //                                            LOG_INFO(g_logger, "Srv: response from worker {}: .playload =
+    //                                            {}",
     //                                                     resp.id, resp.payload);
     //                                        },
     //                                        [](ThreadQuitMessage) {}},
