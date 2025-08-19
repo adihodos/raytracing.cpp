@@ -121,6 +121,6 @@ void PlatformWindow::event_loop() {
         Events.render_event(draw_params);
 
         SDL_GL_SwapWindow(_window);
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        // std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
 }

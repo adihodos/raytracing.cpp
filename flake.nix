@@ -36,6 +36,7 @@
               lcov
               vcpkg
               vcpkg-tool
+              lnav
 
               vulkan-tools
               vulkan-headers
