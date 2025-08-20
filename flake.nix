@@ -37,6 +37,7 @@
               vcpkg
               vcpkg-tool
               lnav
+              qtcreator
 
               vulkan-tools
               vulkan-headers

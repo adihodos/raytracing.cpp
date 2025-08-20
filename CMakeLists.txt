@@ -159,6 +159,12 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/src/ui.backend.nuklear.cc
   ${PROJECT_SOURCE_DIR}/src/error.hpp
   ${PROJECT_SOURCE_DIR}/src/ray.hpp
+  ${PROJECT_SOURCE_DIR}/src/interval.hpp
+  ${PROJECT_SOURCE_DIR}/src/color.hpp
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.image.display.hpp
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.image.display.cc
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.object.defs.hpp
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.object.defs.cc
 )
 
 add_dependencies(${CMAKE_PROJECT_NAME} copy_data)

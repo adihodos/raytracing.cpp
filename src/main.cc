@@ -48,10 +48,13 @@
 #include <atomic_queue/atomic_queue.h>
 #include <lyra/lyra.hpp>
 
+#include "color.hpp"
 #include "memory.arena.hpp"
 #include "misc.things.hpp"
 #include "platform.window.hpp"
 #include "ray.hpp"
+#include "ray.tracer.image.display.hpp"
+#include "ray.tracer.object.defs.hpp"
 #include "short_alloc.hpp"
 #include "ui.backend.nuklear.hpp"
 
@@ -244,18 +247,6 @@ struct ThreadQuitMessage {
     uint8_t dummy;
 };
 
-struct RGBA {
-    union {
-        struct {
-            uint8_t r;
-            uint8_t g;
-            uint8_t b;
-            uint8_t a;
-        };
-        uint32_t color;
-    };
-};
-
 struct RaytracedPixel {
     uint32_t rtp_x;
     uint32_t rtp_y;
@@ -369,7 +360,7 @@ void UILogic::do_ui(UIContext* uictx, const uint32_t pixels_raytraced, const uin
 
     char scratch_buffer[1024];
 
-    if (nk_begin(ctx, "OpenGL Demo", nk_rect(50, 50, 320, 480),
+    if (nk_begin(ctx, "OpenGL Demo", nk_rect(50, 50, 640, 480),
                  NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_SCALABLE | NK_WINDOW_MINIMIZABLE | NK_WINDOW_TITLE)) {
 
         nk_layout_row_dynamic(ctx, 32, 2);
@@ -407,14 +398,82 @@ struct RayTracingWorkPackage {
     glm::u16vec2 pixels_end;
 };
 
-struct RayTracingSetup {
-    uint32_t rts_img_width{1024};
-    uint32_t rts_img_height{1024};
-    glm::vec3 rts_lower_left;
-    glm::vec3 rts_horizontal;
-    glm::vec3 rts_vertical;
-    glm::vec3 rts_origin;
+struct RayTracingCore {
+    float rts_aspect_ratio;
+    uint32_t rts_img_width;
+    uint32_t rts_img_height;
+    float rts_focal_length;
+    float rts_viewport_height;
+    float rts_viewport_width;
+    glm::vec3 rts_pixel_delta_u;
+    glm::vec3 rts_pixel_delta_v;
+    glm::vec3 rts_pixel00;
+    glm::vec3 rts_cam_center;
+    HittableObject_Collection rts_world;
+
+    static std::shared_ptr<RayTracingCore> default_setup();
+
+    static glm::vec3 compute_color(const Ray& r, const HittableObject_Collection& world) noexcept {
+        if (const tl::optional<IntersectionRecord> int_rec =
+                world.intersects(r, Interval{0.0, std::numeric_limits<double>::infinity()})) {
+            return 0.5f * (int_rec->Normal + glm::vec3{1.0f});
+        }
+
+        const glm::vec3 unit_dir = glm::normalize(r.Direction);
+        const float t = 0.5f * (unit_dir.y + 1.0f);
+        return (1.0f - t) * glm::vec3{1.0f} + t * glm::vec3{0.5f, 0.7f, 1.0f};
+    }
+
+    RGBA raytrace_pixel(const uint32_t x, const uint32_t y) const {
+        const glm::vec3 pixel_center =
+            rts_pixel00 + static_cast<float>(x) * rts_pixel_delta_u + static_cast<float>(y) * rts_pixel_delta_v;
+        const Ray r{
+            .Origin = rts_cam_center,
+            .Direction = pixel_center - rts_cam_center,
+        };
+        return RGBA{compute_color(r, rts_world)};
+    }
 };
+
+std::shared_ptr<RayTracingCore> RayTracingCore::default_setup() {
+    constexpr float aspect_ratio = 16.0f / 9.0f;
+    constexpr uint32_t image_width = 800;
+    constexpr uint32_t image_height = static_cast<uint32_t>(static_cast<float>(image_width) / aspect_ratio);
+
+    constexpr float focal_length = 1.0f;
+    constexpr float viewport_height = 2.0f;
+    constexpr float viewport_width = viewport_height * (static_cast<float>(image_width) / image_height);
+
+    const glm::vec3 camera_center = glm::vec3{0.0f};
+
+    const glm::vec3 viewport_u{viewport_width, 0.0f, 0.0f};
+    const glm::vec3 viewport_v{0.0f, -viewport_height, 0.0f};
+
+    const glm::vec3 pixel_delta_u = viewport_u / static_cast<float>(image_width);
+    const glm::vec3 pixel_delta_v = viewport_v / static_cast<float>(image_height);
+
+    const glm::vec3 viewport_upper_left =
+        camera_center - glm::vec3{0.0f, 0.0f, focal_length} - viewport_u * 0.5f - viewport_v * 0.5f;
+    const glm::vec3 pixel00_loc = viewport_upper_left + 0.5f * (pixel_delta_u + pixel_delta_v);
+
+    HittableObject_Collection world;
+    world.add_object(HittableObject::make_sphere(glm::vec3{0.0f, 0.0f, -1.0f}, 0.5f));
+    world.add_object(HittableObject::make_sphere(glm::vec3{0.0f, -100.5f, -1.0f}, 100.0f));
+
+    return std::make_shared<RayTracingCore>(RayTracingCore{
+        .rts_aspect_ratio = aspect_ratio,
+        .rts_img_width = image_width,
+        .rts_img_height = image_height,
+        .rts_focal_length = focal_length,
+        .rts_viewport_height = viewport_height,
+        .rts_viewport_width = viewport_width,
+        .rts_pixel_delta_u = pixel_delta_u,
+        .rts_pixel_delta_v = pixel_delta_v,
+        .rts_pixel00 = pixel00_loc,
+        .rts_cam_center = camera_center,
+        .rts_world = std::move(world),
+    });
+}
 
 struct MonkaGigaQueue {
     std::vector<RayTracingWorkPackage> mgq_queue;
@@ -440,7 +499,7 @@ using RayTracingWorkStealingQueueType = atomic_queue::AtomicQueue2<RayTracingWor
 
 struct RayTracingWorker {
     MonkaGigaQueue* _work_queue{};
-    RayTracingSetup _rtsetup;
+    std::shared_ptr<RayTracingCore> _rtcore{};
     uint32_t _workerid{};
     void* _zmq_channel{};
     void* _zmq_poller{};
@@ -450,7 +509,6 @@ struct RayTracingWorker {
 };
 
 void RayTracingWorker::worker_loop() {
-
     SCOPED_GUARD([this]() { WRAP_ZMQ_FUNC(zmq_poller_remove, _zmq_poller, _zmq_channel); });
     SCOPED_GUARD([this]() { WRAP_ZMQ_FUNC(zmq_close, _zmq_channel); });
 
@@ -514,47 +572,16 @@ void RayTracingWorker::worker_loop() {
     }
 }
 
-bool hit_sphere(const glm::vec3& center, const float radius, const Ray& r) noexcept {
-    const glm::vec3 oc = r.Origin - center;
-    const float a = glm::dot(r.Direction, r.Direction);
-    const float b = 2.0f * glm::dot(oc, r.Direction);
-    const float c = glm::dot(oc, oc) - radius * radius;
-    const float delta = b * b - 4.0f * a * c;
-    return delta > 0.0f;
-}
-
-glm::vec3 compute_color(const Ray& r) noexcept {
-    if (hit_sphere(glm::vec3{ 0.0f, 0.0f, -1.0f }, 0.5f, r)) {
-        return glm::vec3{ 1.0f, 0.0f, 0.0f };
-    }
-
-    const glm::vec3 unit_dir = glm::normalize(r.Direction);
-    const float t = 0.5f * (unit_dir.y + 1.0f);
-    return (1.0f - t) * glm::vec3{1.0f} + t * glm::vec3{0.5f, 0.7f, 1.0f};
-}
-
 void RayTracingWorker::process_tracing_work_package(const RayTracingWorkPackage& rtpkg) {
     for (uint16_t y = rtpkg.pixels_start.y; y < rtpkg.pixels_end.y; ++y) {
         for (uint16_t x = rtpkg.pixels_start.x; x < rtpkg.pixels_end.x; ++x) {
-            const float u = static_cast<float>(x) / static_cast<float>(_rtsetup.rts_img_width);
-            const float v = static_cast<float>(y) / static_cast<float>(_rtsetup.rts_img_height);
-            const Ray r{
-                .Origin = _rtsetup.rts_origin,
-                .Direction = _rtsetup.rts_lower_left + u * _rtsetup.rts_horizontal + v * _rtsetup.rts_vertical,
-            };
-            const glm::vec3 color = compute_color(r);
-            RGBA pixel_color;
-            pixel_color.r = static_cast<uint8_t>(color.r * 255.0f);
-            pixel_color.g = static_cast<uint8_t>(color.g * 255.0f);
-            pixel_color.b = static_cast<uint8_t>(color.b * 255.0f);
-            pixel_color.a = 255;
-
-            g_pixels_processed += 1;
+            const RGBA pixel_color = _rtcore->raytrace_pixel(x, y);
             send_thread_pkg(this->_zmq_channel, RaytracedPixel{
                                                     .rtp_x = x,
                                                     .rtp_y = y,
                                                     .rtp_color = pixel_color.color,
                                                 });
+            g_pixels_processed += 1;
         }
     }
 }
@@ -584,11 +611,12 @@ public:
           _zmq_context{std::exchange(rhs._zmq_context, nullptr)}, _zmq_poller{std::exchange(rhs._zmq_poller, nullptr)},
           _workqueue{std::move(rhs._workqueue)}, _worker_context{std::move(rhs._worker_context)} {}
 
-    static tl::optional<RayTracer> create(glm::u16vec2 output_img_size);
-    void update(std::span<RGBA> backbuffer);
+    static tl::optional<RayTracer> create();
+    void update(RayTracedImageDisplay* img_output);
     void shutdown();
     uint32_t pixels_count() const noexcept { return _imgsize.x * _imgsize.y; }
     uint32_t pixels_raytraced() const noexcept { return _pixels_raytraced; }
+    glm::u16vec2 image_size() const noexcept { return _imgsize; }
 
 private:
     glm::u16vec2 _imgsize;
@@ -617,7 +645,7 @@ T round_up(const T value, const T multiple) noexcept {
     return ((value + multiple - 1) / multiple) * multiple;
 }
 
-tl::optional<RayTracer> RayTracer::create(glm::u16vec2 img_size) {
+tl::optional<RayTracer> RayTracer::create() {
     int32_t z_major{};
     int32_t z_minor{};
     int32_t z_patch{};
@@ -635,6 +663,8 @@ tl::optional<RayTracer> RayTracer::create(glm::u16vec2 img_size) {
         return tl::nullopt;
     }
 
+    std::shared_ptr<RayTracingCore> rtsetup = RayTracingCore::default_setup();
+    const glm::u16vec2 img_size{rtsetup->rts_img_width, rtsetup->rts_img_height};
     const glm::uvec2 rounded_img_size{round_up<uint32_t>(img_size.x, 8), round_up<uint32_t>(img_size.y, 8)};
 
     const auto cpus = std::min<uint32_t>(std::thread::hardware_concurrency(), 8);
@@ -662,12 +692,6 @@ tl::optional<RayTracer> RayTracer::create(glm::u16vec2 img_size) {
     work_queue->push_packages(std::move(work_queue_pkgs));
 
     std::latch workers_rdy{cpus};
-    const RayTracingSetup rtsetup{.rts_img_width = img_size.x,
-                                  .rts_img_height = img_size.y,
-                                  .rts_lower_left = {-2.0f, -1.0f, -1.0f},
-                                  .rts_horizontal = {4.0f, 0.0f, 0.0f},
-                                  .rts_vertical = {0.0f, 2.0f, 0.0f},
-                                  .rts_origin = glm::vec3{0.0f}};
 
     std::vector<RayTracingWorkerContext> worker_ctx{};
 
@@ -698,10 +722,10 @@ tl::optional<RayTracer> RayTracer::create(glm::u16vec2 img_size) {
         }
 
         worker_ctx.emplace_back(
-            std::thread{[&workers_rdy, wqueue = work_queue.get(), idx, &rtsetup, ctx_main]() {
+            std::thread{[&workers_rdy, wqueue = work_queue.get(), idx, rtsetup, ctx_main]() {
                 RayTracingWorker worker;
                 worker._workerid = idx;
-                worker._rtsetup = rtsetup;
+                worker._rtcore = rtsetup;
                 worker._work_queue = wqueue;
 
                 {
@@ -762,9 +786,9 @@ tl::optional<RayTracer> RayTracer::create(glm::u16vec2 img_size) {
     };
 }
 
-void RayTracer::update(std::span<RGBA> backbuffer) {
+void RayTracer::update(RayTracedImageDisplay* img_output) {
     std::byte scratchbuffer[2048];
-    MemoryArena a{scratchbuffer};
+    MemoryArena scratch_arena{scratchbuffer};
 
     assert(std::size(scratchbuffer) >= _poll_count * sizeof(zmq_poller_event_t));
     std::vector<zmq_poller_event_t> polled_events{_poll_count};
@@ -788,8 +812,8 @@ void RayTracer::update(std::span<RGBA> backbuffer) {
                                [](const ThreadMessageB& msg_b) {},
                                [](const ThreadQuitMessage) {},
                                [](const WorkerResponse&) {},
-                               [backbuffer, this, width = _imgsize.x](const RaytracedPixel pixel) {
-                                   backbuffer[pixel.rtp_y * width + pixel.rtp_x] = RGBA{.color = pixel.rtp_color};
+                               [this, img_output](const RaytracedPixel pixel) {
+                                   img_output->write_pixel(pixel.rtp_x, pixel.rtp_y, RGBA{pixel.rtp_color});
                                    _pixels_raytraced += 1;
                                },
                            },
@@ -807,168 +831,6 @@ void RayTracer::shutdown() {
         LOG_INFO(g_logger, "Stopping worker on channel {}", fmt::ptr(ctx.rtwc_channel_from_worker));
         send_thread_pkg(ctx.rtwc_channel_from_worker, ThreadQuitMessage{});
     });
-}
-
-struct alignas(16) RayTracedImageSSBOData {
-    uint32_t rti_width;
-    uint32_t rti_height;
-    RGBA rti_pixels[1];
-};
-
-class RayTracedImageDisplay {
-private:
-    struct PrivateConstructionToken {};
-
-public:
-    static tl::optional<RayTracedImageDisplay> create(glm::uvec2 img_size);
-
-    RayTracedImageDisplay(glm::uvec2 img_size, GLuint vao, GLuint pipeline, GLuint vertex_prog, GLuint frag_prog,
-                          GLuint ssbo, RayTracedImageSSBOData* ssbo_ptr) noexcept
-        : rtid_imgsize{img_size}, rtid_vao{vao}, rtid_pipeline{pipeline}, rtid_vertexprog{vertex_prog},
-          rtid_fragprog{frag_prog}, rtid_pixelsbuffer{ssbo}, rtid_ssboptr{ssbo_ptr} {}
-
-    RayTracedImageDisplay(RayTracedImageDisplay&& rhs) noexcept
-        : rtid_imgsize{rhs.rtid_imgsize}, rtid_vao{std::exchange(rhs.rtid_vao, 0)},
-          rtid_pipeline{std::exchange(rhs.rtid_pipeline, 0)}, rtid_vertexprog{std::exchange(rhs.rtid_vertexprog, 0)},
-          rtid_fragprog{std::exchange(rhs.rtid_fragprog, 0)},
-          rtid_pixelsbuffer{std::exchange(rhs.rtid_pixelsbuffer, 0)},
-          rtid_ssboptr{std::exchange(rhs.rtid_ssboptr, nullptr)} {}
-
-    RayTracedImageDisplay(const RayTracedImageDisplay&) = delete;
-    RayTracedImageDisplay& operator=(const RayTracedImageDisplay&) = delete;
-
-    ~RayTracedImageDisplay() noexcept {
-        if (rtid_vao)
-            glDeleteVertexArrays(1, &rtid_vao);
-        if (rtid_pipeline)
-            glDeleteProgramPipelines(1, &rtid_pipeline);
-    }
-
-    std::span<RGBA> backbuffer() noexcept {
-        return std::span<RGBA>{rtid_ssboptr->rti_pixels, rtid_imgsize.x * rtid_imgsize.y};
-    }
-
-    void write_pixel(RGBA pixel, const uint32_t x, const uint32_t y) {
-        rtid_ssboptr->rti_pixels[y * rtid_imgsize.x + x] = pixel;
-    }
-
-    void set_image_size(glm::uvec2 img_size) {
-        rtid_imgsize = img_size;
-        rtid_ssboptr->rti_width = img_size.x;
-        rtid_ssboptr->rti_height = img_size.y;
-    }
-
-    void draw() {
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, rtid_pixelsbuffer);
-        glBindProgramPipeline(rtid_pipeline);
-        glBindVertexArray(rtid_vao);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, 0);
-    }
-
-private:
-    glm::uvec2 rtid_imgsize{};
-    GLuint rtid_vao{};
-    GLuint rtid_pipeline{};
-    GLuint rtid_vertexprog{};
-    GLuint rtid_fragprog{};
-    GLuint rtid_pixelsbuffer{};
-    RayTracedImageSSBOData* rtid_ssboptr{};
-};
-
-tl::optional<RayTracedImageDisplay> RayTracedImageDisplay::create(glm::uvec2 img_size) {
-    GLuint pixel_buffer{};
-    glCreateBuffers(1, &pixel_buffer);
-    const GLsizeiptr buffer_size =
-        static_cast<GLsizeiptr>(sizeof(RayTracedImageSSBOData) + img_size.x * img_size.y * sizeof(RGBA));
-    glNamedBufferStorage(pixel_buffer, buffer_size, nullptr,
-                         GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
-    RayTracedImageSSBOData* gpu_buffer = static_cast<RayTracedImageSSBOData*>(glMapNamedBufferRange(
-        pixel_buffer, 0, buffer_size, GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT));
-
-    if (!gpu_buffer) {
-        LOG_CRITICAL(g_logger, "Failed to map GPU buffer for image data!");
-        return tl::nullopt;
-    }
-
-    gpu_buffer->rti_height = img_size.y;
-    gpu_buffer->rti_width = img_size.x;
-
-    GLuint vao{};
-    glCreateVertexArrays(1, &vao);
-
-    static constexpr const char* VTX_SHADER_CODE = R"#(
-#version 460 core
-//
-// see https://trass3r.github.io/coding/2019/09/11/bufferless-rendering.html
-
-layout (location = 0) out gl_PerVertex {
-    vec4 gl_Position;
-};
-
-void main() {
-    const vec2 pos = vec2(gl_VertexID % 2, gl_VertexID / 2) * 4.0 - 1.0;
-    gl_Position = vec4(pos, 0.0, 1.0);
-}
-)#";
-
-    constexpr const char* const FRAG_SHADER_CODE = R"#(
-#version 460 core
-#extension GL_EXT_nonuniform_qualifier : enable
-
-layout (std430, binding = 0) readonly buffer RayTracedImageSSBO {
-    uint width;
-    uint height;
-    uint pixels[];
-};
-
-layout (location = 0) out vec4 FinalFragColor;
-
-void main() {
-    const uint pixel_idx = uint(gl_FragCoord.y) * width + uint(gl_FragCoord.x);
-    const uint pixel_color = pixels[pixel_idx];
-    FinalFragColor = unpackUnorm4x8(pixel_color);
-}
-)#";
-
-    GLuint pipeline{};
-    glCreateProgramPipelines(1, &pipeline);
-    GLuint gpu_programs[2]{};
-
-    constexpr const std::tuple<const char*, const char*, GLbitfield, GLenum, shaderc_shader_kind, const char*>
-        shader_create_data[] = {
-            {
-                VTX_SHADER_CODE,
-                "main",
-                GL_VERTEX_SHADER_BIT,
-                GL_VERTEX_SHADER,
-                shaderc_vertex_shader,
-                "ui_vertex_shader",
-            },
-            {
-                FRAG_SHADER_CODE,
-                "main",
-                GL_FRAGMENT_SHADER_BIT,
-                GL_FRAGMENT_SHADER,
-                shaderc_fragment_shader,
-                "ui_fragment_shader",
-            },
-        };
-
-    size_t idx{};
-    for (auto [shader_code, entry_point, shader_stage, shader_type, shaderc_kind, shader_id] : shader_create_data) {
-        auto shader_prog =
-            create_gpu_program_from_memory(shader_type, shaderc_kind, shader_id, shader_code, entry_point, {});
-        if (!shader_prog)
-            return tl::nullopt;
-
-        gpu_programs[idx++] = *shader_prog;
-        glUseProgramStages(pipeline, shader_stage, *shader_prog);
-    }
-
-    return tl::optional<RayTracedImageDisplay>{
-        tl::in_place, img_size, vao, pipeline, gpu_programs[0], gpu_programs[1], pixel_buffer, gpu_buffer,
-    };
 }
 
 std::byte kScratchBuffer[32 * 1024 * 1024];
@@ -1004,20 +866,9 @@ int main(int argc, char** argv) {
     g_logger = quill::Frontend::create_or_get_logger("global_logger", std::move(file_sink));
     g_logger->set_log_level(quill::LogLevel::Debug);
 
-    auto window = PlatformWindow::create(glm::ivec2{800, 600});
+    auto window = PlatformWindow::create();
     if (!window) {
         LOG_ERROR(g_logger, "Failed to create main window!");
-        return EXIT_FAILURE;
-    }
-
-    const auto image_size = glm::u16vec2{
-        static_cast<glm::uint16>(window->RenderData.surface_size.x),
-        static_cast<glm::uint16>(window->RenderData.surface_size.y),
-    };
-
-    auto raytraced_img_display = RayTracedImageDisplay::create(image_size);
-    if (!raytraced_img_display) {
-        LOG_ERROR(g_logger, "Failed to create image display!");
         return EXIT_FAILURE;
     }
 
@@ -1027,9 +878,16 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    auto raytracer = RayTracer::create(image_size);
+    auto raytracer = RayTracer::create();
     if (!raytracer) {
         LOG_ERROR(g_logger, "Failed to create raytracer ...");
+        return EXIT_FAILURE;
+    }
+
+    auto raytraced_img_display =
+        RayTracedImageDisplay::create(window->RenderData.surface_size, raytracer->image_size());
+    if (!raytraced_img_display) {
+        LOG_ERROR(g_logger, "Failed to create image display!");
         return EXIT_FAILURE;
     }
 
@@ -1072,7 +930,7 @@ int main(int argc, char** argv) {
     });
 
     window->Events.render_event.bind([main = &main_ctx](const DrawParams& dp) {
-        main->raytracer->update(main->img_display->backbuffer());
+        main->raytracer->update(main->img_display);
         main->ui_logic.do_ui(&main->ui_ctx, main->raytracer->pixels_raytraced(), main->raytracer->pixels_count());
 
         glViewportIndexedf(0, 0.0f, 0.0f, static_cast<float>(dp.surface_width), static_cast<float>(dp.surface_height));
