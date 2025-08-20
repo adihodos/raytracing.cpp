@@ -81,7 +81,7 @@ public:
     SimpleArenaAllocator(MemoryArena& mem_arena) noexcept : SimpleArenaAllocator{&mem_arena} {}
 
     template <typename U>
-    SimpleArenaAllocator(const SimpleArenaAllocator<U>& rhs) noexcept : SimpleArenaAllocator{rhs._mem_arena} {}
+    SimpleArenaAllocator(const SimpleArenaAllocator<U>& rhs) noexcept : SimpleArenaAllocator{rhs.arena()} {}
 
     [[nodiscard]] T* allocate(size_t n) noexcept {
         return static_cast<T*>(_mem_arena->mem_alloc(n * sizeof(T), alignof(T)));
@@ -90,6 +90,8 @@ public:
 
     inline bool operator==(const SimpleArenaAllocator<T>& rhs) noexcept { return this->_mem_arena == rhs._mem_arena; }
     inline bool operator!=(const SimpleArenaAllocator<T>& rhs) noexcept { return !(*this == rhs); }
+
+    MemoryArena* arena() const noexcept { return _mem_arena; }
 
 private:
     MemoryArena* _mem_arena;

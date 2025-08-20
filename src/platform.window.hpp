@@ -27,7 +27,7 @@ public:
     PlatformWindow(PlatformWindow&& rhs) noexcept
         : _window{std::exchange(rhs._window, nullptr)}, Events{std::move(rhs.Events)}, RenderData{rhs.RenderData} {}
 
-    static tl::optional<PlatformWindow> create();
+    static tl::optional<PlatformWindow> create(tl::optional<glm::ivec2> wnd_size = tl::nullopt);
 
     struct PollInputStartEvent {};
     struct PollInputEndEvent {};

@@ -21,13 +21,29 @@ PlatformWindow::~PlatformWindow() {
     CHECKED_SDL(SDL_DestroyWindow, _window);
 }
 
-tl::optional<PlatformWindow> PlatformWindow::create() {
+tl::optional<PlatformWindow> PlatformWindow::create(tl::optional<glm::ivec2> wnd_size) {
     if (!CHECKED_SDL(SDL_InitSubSystem, SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         return tl::nullopt;
     }
 
-    SDL_Window* window{
-        CHECKED_SDL(SDL_CreateWindow, "SDL Window", 1600, 1200, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE)};
+    const glm::ivec2 window_size = wnd_size.map_or_else(
+        [](glm::ivec2 s) { return s; },
+        []() {
+            const auto primary_display_id = CHECKED_SDL(SDL_GetPrimaryDisplay);
+            if (primary_display_id == 0) {
+                return glm::ivec2{1600, 1200};
+            }
+
+            SDL_Rect display_bounds;
+            if (const auto result = CHECKED_SDL(SDL_GetDisplayBounds, primary_display_id, &display_bounds); !result) {
+                return glm::ivec2{1600, 1200};
+            }
+
+            return glm::ivec2{display_bounds.w, display_bounds.h};
+        });
+
+    const SDL_WindowFlags window_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | (wnd_size ? 0 : SDL_WINDOW_FULLSCREEN);
+    SDL_Window* window{CHECKED_SDL(SDL_CreateWindow, "SDL Window", window_size.x, window_size.y, window_flags)};
 
     if (!window) {
         return tl::nullopt;

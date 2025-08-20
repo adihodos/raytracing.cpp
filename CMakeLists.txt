@@ -4,8 +4,8 @@ project(
   VERSION 0.1.0.0
   LANGUAGES C CXX)
 
-cmake_policy(SET CMP0091 NEW)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+#cmake_policy(SET CMP0091 NEW)
+#set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
@@ -125,10 +125,10 @@ target_compile_definitions(
     $<$<AND:$<COMPILE_LANG_AND_ID:CXX,GNU>,$<CONFIG:RelWithDebInfo,Debug>>:_GLIBCXX_ASSERTIONS>
 )
 
-target_compile_options(
-  global-project-compile-options-lib
-  INTERFACE
-    $<$<CXX_COMPILER_ID:MSVC>:/source-charset:utf-8;/execution-charset:utf-8>)
+#target_compile_options(
+#  global-project-compile-options-lib
+#  INTERFACE
+#    $<$<CXX_COMPILER_ID:MSVC>:/source-charset:utf-8;/execution-charset:utf-8>)
 
 target_compile_definitions(
   global-project-compile-options-lib
@@ -157,7 +157,9 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/src/renderer.misc.hpp
   ${PROJECT_SOURCE_DIR}/src/ui.backend.nuklear.hpp
   ${PROJECT_SOURCE_DIR}/src/ui.backend.nuklear.cc
-  ${PROJECT_SOURCE_DIR}/src/error.hpp)
+  ${PROJECT_SOURCE_DIR}/src/error.hpp
+  ${PROJECT_SOURCE_DIR}/src/ray.hpp
+)
 
 add_dependencies(${CMAKE_PROJECT_NAME} copy_data)
 
