@@ -12,7 +12,7 @@ tl::optional<RayTracedImageDisplay> RayTracedImageDisplay::create(glm::uvec2 sur
     GLuint pixel_buffer{};
     glCreateBuffers(1, &pixel_buffer);
     const GLsizeiptr buffer_size =
-        static_cast<GLsizeiptr>(sizeof(RayTracedImageSSBOData) + surface_size.x * surface_size.y * sizeof(RGBA));
+        static_cast<GLsizeiptr>(sizeof(RayTracedImageSSBOData) + surface_size.x * surface_size.y * sizeof(RGBAColor));
     glNamedBufferStorage(pixel_buffer, buffer_size, nullptr,
                          GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
     RayTracedImageSSBOData* gpu_buffer = static_cast<RayTracedImageSSBOData*>(glMapNamedBufferRange(
@@ -105,7 +105,7 @@ FinalFragColor = unpackUnorm4x8(pixel_color);
     };
 }
 
-void RayTracedImageDisplay::write_pixel(const uint32_t x, const uint32_t y, const RGBA color) {
+void RayTracedImageDisplay::write_pixel(const uint32_t x, const uint32_t y, const RGBAColor color) {
     //
     // translate image to be in the center of the rendered surface
     const glm::uvec2 translation = (rtid_surface_size - rtid_image_size) / 2u;

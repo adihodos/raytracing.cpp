@@ -165,6 +165,8 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/src/ray.tracer.image.display.cc
   ${PROJECT_SOURCE_DIR}/src/ray.tracer.object.defs.hpp
   ${PROJECT_SOURCE_DIR}/src/ray.tracer.object.defs.cc
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.core.hpp
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.core.cc
 )
 
 add_dependencies(${CMAKE_PROJECT_NAME} copy_data)

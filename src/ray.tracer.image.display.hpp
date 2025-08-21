@@ -10,7 +10,7 @@
 struct alignas(16) RayTracedImageSSBOData {
     uint32_t rti_width;
     uint32_t rti_height;
-    RGBA rti_pixels[1];
+    RGBAColor rti_pixels[1];
 };
 
 class RayTracedImageDisplay {
@@ -44,7 +44,7 @@ public:
 
     glm::uvec2 surface_size() const noexcept { return rtid_image_size; }
 
-    void write_pixel(const uint32_t x, const uint32_t y, const RGBA color);
+    void write_pixel(const uint32_t x, const uint32_t y, const RGBAColor color);
 
     void draw() {
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, rtid_pixelsbuffer);

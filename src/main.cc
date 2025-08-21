@@ -52,7 +52,9 @@
 #include "memory.arena.hpp"
 #include "misc.things.hpp"
 #include "platform.window.hpp"
+#include "random.number.gen.hpp"
 #include "ray.hpp"
+#include "ray.tracer.core.hpp"
 #include "ray.tracer.image.display.hpp"
 #include "ray.tracer.object.defs.hpp"
 #include "short_alloc.hpp"
@@ -375,7 +377,7 @@ void UILogic::do_ui(UIContext* uictx, const uint32_t pixels_raytraced, const uin
         auto fmt_res = fmt::format_to(scratch_buffer, "Pixels ({}/{})", pixels_raytraced, pixels_total);
         *fmt_res.out = 0;
         nk_label_colored(ctx, scratch_buffer, NK_TEXT_ALIGN_LEFT, nk_color{0, 255, 0, 255});
-        // nk_prog(ctx, g_pixels_processed.load(), pixels_total, false);
+        nk_prog(ctx, g_pixels_processed.load(), pixels_total, false);
 
         // nk_layout_row_static(ctx, 32, 256, 1);
 
@@ -397,83 +399,6 @@ struct RayTracingWorkPackage {
     glm::u16vec2 pixels_start;
     glm::u16vec2 pixels_end;
 };
-
-struct RayTracingCore {
-    float rts_aspect_ratio;
-    uint32_t rts_img_width;
-    uint32_t rts_img_height;
-    float rts_focal_length;
-    float rts_viewport_height;
-    float rts_viewport_width;
-    glm::vec3 rts_pixel_delta_u;
-    glm::vec3 rts_pixel_delta_v;
-    glm::vec3 rts_pixel00;
-    glm::vec3 rts_cam_center;
-    HittableObject_Collection rts_world;
-
-    static std::shared_ptr<RayTracingCore> default_setup();
-
-    static glm::vec3 compute_color(const Ray& r, const HittableObject_Collection& world) noexcept {
-        if (const tl::optional<IntersectionRecord> int_rec =
-                world.intersects(r, Interval{0.0, std::numeric_limits<double>::infinity()})) {
-            return 0.5f * (int_rec->Normal + glm::vec3{1.0f});
-        }
-
-        const glm::vec3 unit_dir = glm::normalize(r.Direction);
-        const float t = 0.5f * (unit_dir.y + 1.0f);
-        return (1.0f - t) * glm::vec3{1.0f} + t * glm::vec3{0.5f, 0.7f, 1.0f};
-    }
-
-    RGBA raytrace_pixel(const uint32_t x, const uint32_t y) const {
-        const glm::vec3 pixel_center =
-            rts_pixel00 + static_cast<float>(x) * rts_pixel_delta_u + static_cast<float>(y) * rts_pixel_delta_v;
-        const Ray r{
-            .Origin = rts_cam_center,
-            .Direction = pixel_center - rts_cam_center,
-        };
-        return RGBA{compute_color(r, rts_world)};
-    }
-};
-
-std::shared_ptr<RayTracingCore> RayTracingCore::default_setup() {
-    constexpr float aspect_ratio = 16.0f / 9.0f;
-    constexpr uint32_t image_width = 800;
-    constexpr uint32_t image_height = static_cast<uint32_t>(static_cast<float>(image_width) / aspect_ratio);
-
-    constexpr float focal_length = 1.0f;
-    constexpr float viewport_height = 2.0f;
-    constexpr float viewport_width = viewport_height * (static_cast<float>(image_width) / image_height);
-
-    const glm::vec3 camera_center = glm::vec3{0.0f};
-
-    const glm::vec3 viewport_u{viewport_width, 0.0f, 0.0f};
-    const glm::vec3 viewport_v{0.0f, -viewport_height, 0.0f};
-
-    const glm::vec3 pixel_delta_u = viewport_u / static_cast<float>(image_width);
-    const glm::vec3 pixel_delta_v = viewport_v / static_cast<float>(image_height);
-
-    const glm::vec3 viewport_upper_left =
-        camera_center - glm::vec3{0.0f, 0.0f, focal_length} - viewport_u * 0.5f - viewport_v * 0.5f;
-    const glm::vec3 pixel00_loc = viewport_upper_left + 0.5f * (pixel_delta_u + pixel_delta_v);
-
-    HittableObject_Collection world;
-    world.add_object(HittableObject::make_sphere(glm::vec3{0.0f, 0.0f, -1.0f}, 0.5f));
-    world.add_object(HittableObject::make_sphere(glm::vec3{0.0f, -100.5f, -1.0f}, 100.0f));
-
-    return std::make_shared<RayTracingCore>(RayTracingCore{
-        .rts_aspect_ratio = aspect_ratio,
-        .rts_img_width = image_width,
-        .rts_img_height = image_height,
-        .rts_focal_length = focal_length,
-        .rts_viewport_height = viewport_height,
-        .rts_viewport_width = viewport_width,
-        .rts_pixel_delta_u = pixel_delta_u,
-        .rts_pixel_delta_v = pixel_delta_v,
-        .rts_pixel00 = pixel00_loc,
-        .rts_cam_center = camera_center,
-        .rts_world = std::move(world),
-    });
-}
 
 struct MonkaGigaQueue {
     std::vector<RayTracingWorkPackage> mgq_queue;
@@ -503,6 +428,7 @@ struct RayTracingWorker {
     uint32_t _workerid{};
     void* _zmq_channel{};
     void* _zmq_poller{};
+    RandomNumberGenerator _randgen{};
 
     void worker_loop();
     void process_tracing_work_package(const RayTracingWorkPackage& pkg);
@@ -575,7 +501,7 @@ void RayTracingWorker::worker_loop() {
 void RayTracingWorker::process_tracing_work_package(const RayTracingWorkPackage& rtpkg) {
     for (uint16_t y = rtpkg.pixels_start.y; y < rtpkg.pixels_end.y; ++y) {
         for (uint16_t x = rtpkg.pixels_start.x; x < rtpkg.pixels_end.x; ++x) {
-            const RGBA pixel_color = _rtcore->raytrace_pixel(x, y);
+            const RGBAColor pixel_color = _rtcore->raytrace_pixel(x, y, _randgen);
             send_thread_pkg(this->_zmq_channel, RaytracedPixel{
                                                     .rtp_x = x,
                                                     .rtp_y = y,
@@ -813,7 +739,7 @@ void RayTracer::update(RayTracedImageDisplay* img_output) {
                                [](const ThreadQuitMessage) {},
                                [](const WorkerResponse&) {},
                                [this, img_output](const RaytracedPixel pixel) {
-                                   img_output->write_pixel(pixel.rtp_x, pixel.rtp_y, RGBA{pixel.rtp_color});
+                                   img_output->write_pixel(pixel.rtp_x, pixel.rtp_y, RGBAColor{pixel.rtp_color});
                                    _pixels_raytraced += 1;
                                },
                            },
