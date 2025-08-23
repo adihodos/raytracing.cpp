@@ -7,16 +7,19 @@
 #include <tl/optional.hpp>
 
 #include "interval.hpp"
+#include "ray.tracer.material.handle.hpp"
 
 struct Ray;
 
 struct IntersectionRecord {
     glm::vec3 P;
     glm::vec3 Normal;
-    double T;
+    MaterialHandleType Material;
     bool FrontFace;
+    double T;
 
-    IntersectionRecord(const glm::vec3& p, const glm::vec3& outward_normal, const float t, const Ray& r) noexcept;
+    IntersectionRecord(const glm::vec3& p, const glm::vec3& outward_normal, const float t, const Ray& r,
+                       MaterialHandleType mtl) noexcept;
 };
 
 enum class HittableObjectKind : uint32_t {
@@ -27,6 +30,7 @@ enum class HittableObjectKind : uint32_t {
 struct HittableObject_Sphere {
     glm::vec3 Center;
     float Radius;
+    MaterialHandleType Material;
 
     tl::optional<IntersectionRecord> intersects(const Ray& r, const Interval ray_t) const;
 };
@@ -37,13 +41,14 @@ struct HittableObject {
         HittableObject_Sphere Sphere;
     };
 
-    static HittableObject make_sphere(const glm::vec3& center, const float radius) noexcept {
+    static HittableObject make_sphere(const glm::vec3& center, const float radius, MaterialHandleType mtl) noexcept {
         return HittableObject{
             .ObjKind = HittableObjectKind::Sphere,
             .Sphere =
                 HittableObject_Sphere{
                     .Center = center,
                     .Radius = radius,
+                    .Material = mtl,
                 },
         };
     }

@@ -4,8 +4,8 @@ project(
   VERSION 0.1.0.0
   LANGUAGES C CXX)
 
-#cmake_policy(SET CMP0091 NEW)
-#set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# cmake_policy(SET CMP0091 NEW) set(CMAKE_MSVC_RUNTIME_LIBRARY
+# "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
@@ -54,6 +54,7 @@ cpmaddpackage("gh:bfgroup/Lyra#develop")
 cpmaddpackage("gh:odygrd/quill@7.5.0")
 cpmaddpackage("gh:g-truc/glm#bf71a834948186f4097caa076cd2663c69a10e1e")
 cpmaddpackage("gh:max0x7ba/atomic_queue@1.7.1")
+cpmaddpackage("gh:rollbear/strong_type@15")
 
 cpmaddpackage(
   NAME
@@ -85,9 +86,25 @@ cpmaddpackage(
   v4.5.1
   DOWNLOAD_ONLY
   True)
+
 if(ZppBits_ADDED)
   add_library(ZppBits INTERFACE IMPORTED)
   target_include_directories(ZppBits INTERFACE "${ZppBits_SOURCE_DIR}")
+endif()
+
+cpmaddpackage(
+  NAME
+  Yas
+  GITHUB_REPOSITORY
+  niXman/yas
+  GIT_TAG
+  master
+  DOWNLOAD_ONLY
+  True)
+
+if (Yas_ADDED)
+  add_library(Yas INTERFACE IMPORTED)
+  target_include_directories(Yas INTERFACE "${Yas_SOURCE_DIR}/include")
 endif()
 
 # cpmaddpackage( NAME spdlog GITHUB_REPOSITORY gabime/spdlog GIT_TAG v1.14.1
@@ -125,10 +142,8 @@ target_compile_definitions(
     $<$<AND:$<COMPILE_LANG_AND_ID:CXX,GNU>,$<CONFIG:RelWithDebInfo,Debug>>:_GLIBCXX_ASSERTIONS>
 )
 
-#target_compile_options(
-#  global-project-compile-options-lib
-#  INTERFACE
-#    $<$<CXX_COMPILER_ID:MSVC>:/source-charset:utf-8;/execution-charset:utf-8>)
+# target_compile_options( global-project-compile-options-lib INTERFACE
+# $<$<CXX_COMPILER_ID:MSVC>:/source-charset:utf-8;/execution-charset:utf-8>)
 
 target_compile_definitions(
   global-project-compile-options-lib
@@ -167,7 +182,9 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/src/ray.tracer.object.defs.cc
   ${PROJECT_SOURCE_DIR}/src/ray.tracer.core.hpp
   ${PROJECT_SOURCE_DIR}/src/ray.tracer.core.cc
-)
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.material.handle.hpp
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.material.defs.hpp
+  ${PROJECT_SOURCE_DIR}/src/ray.tracer.material.defs.cc)
 
 add_dependencies(${CMAKE_PROJECT_NAME} copy_data)
 
@@ -179,6 +196,7 @@ target_link_libraries(
   PRIVATE fmt::fmt
           tl::expected
           tl::optional
+          strong_type::strong_type
           # spdlog::spdlog
           nuklear
           quill::quill
@@ -190,4 +208,6 @@ target_link_libraries(
           SDL3::SDL3-static
           glm::glm
           Vulkan::shaderc_combined
-          max0x7ba::atomic_queue)
+          max0x7ba::atomic_queue
+          Yas
+        )

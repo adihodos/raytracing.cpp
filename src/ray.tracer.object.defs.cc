@@ -8,10 +8,11 @@
 
 #include "ray.hpp"
 
-IntersectionRecord::IntersectionRecord(const glm::vec3& p, const glm::vec3& outward_normal, const float t,
-                                       const Ray& r) noexcept {
+IntersectionRecord::IntersectionRecord(const glm::vec3& p, const glm::vec3& outward_normal, const float t, const Ray& r,
+                                       MaterialHandleType mtl) noexcept {
     this->P = p;
     this->T = t;
+    this->Material = mtl;
     this->FrontFace = glm::dot(r.Direction, outward_normal) < 0.0f;
     this->Normal = this->FrontFace ? outward_normal : -outward_normal;
 }
@@ -61,7 +62,7 @@ tl::optional<IntersectionRecord> HittableObject_Sphere::intersects(const Ray& r,
     const glm::vec3 p = r.point_at_param(root);
     const glm::vec3 outward_normal = (p - Center) / Radius;
 
-    return IntersectionRecord{p, outward_normal, root, r};
+    return IntersectionRecord{p, outward_normal, root, r, Material};
 }
 
 tl::optional<IntersectionRecord> HittableObject_Collection::intersects(const Ray& r, const Interval ray_t) const {

@@ -32,6 +32,15 @@ public:
         return glm::dot(normal, p) > 0.0f ? p : -p;
     }
 
+    glm::vec3 random_vector_on_unit_disk() noexcept {
+        for (;;) {
+            const glm::vec3 p = glm::vec3{random_double(-1.0f, 1.0f), random_double(-1.0f, 1.0f), 0.0f};
+            if (glm::dot(p, p) < 1.0f) {
+                return p;
+            }
+        }
+    }
+
 private:
     std::random_device _randdev{};
     std::mt19937 _randgen{_randdev()};
