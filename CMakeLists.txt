@@ -102,7 +102,17 @@ cpmaddpackage(
   DOWNLOAD_ONLY
   True)
 
-if (Yas_ADDED)
+cpmaddpackage(
+  NAME
+  Reflect-CPP
+  GITHUB_REPOSITORY
+  getml/reflect-cpp
+  GIT_TAG
+  main
+  OPTIONS
+  "BUILD_SHARED_LIBS OFF")
+
+if(Yas_ADDED)
   add_library(Yas INTERFACE IMPORTED)
   target_include_directories(Yas INTERFACE "${Yas_SOURCE_DIR}/include")
 endif()
@@ -209,5 +219,6 @@ target_link_libraries(
           glm::glm
           Vulkan::shaderc_combined
           max0x7ba::atomic_queue
-          Yas
-        )
+          # reflectcpp::reflectcpp
+          reflectcpp
+          Yas)

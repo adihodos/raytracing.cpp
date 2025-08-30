@@ -38,6 +38,11 @@
               vcpkg-tool
               lnav
               qtcreator
+              jq
+
+              #performance profiling
+              hotspot
+              linuxKernel.packages.linux_xanmod_latest.perf
 
               vulkan-tools
               vulkan-headers

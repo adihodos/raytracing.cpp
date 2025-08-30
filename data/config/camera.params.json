@@ -1,0 +1,24 @@
+{
+  "aspect_ratio": 1.7777777,
+  "image_width": 1200,
+  "samples_per_pixel": 100,
+  "max_depth": 50,
+  "vertical_fov": 90.0,
+  "defocus_angle": 10.0,
+  "focus_distance": 3.4,
+  "lookfrom": [
+    -2.0,
+    2.0,
+    1.0
+  ],
+  "lookat": [
+    0.0,
+    0.0,
+    -1.0
+  ],
+  "world_up": [
+    0.0,
+    1.0,
+    0.0
+  ]
+}

@@ -353,10 +353,12 @@ struct UIOptions {
 struct UILogic {
     UIOptions opts;
 
-    void do_ui(UIContext* uictx, const uint32_t pixels_raytraced, const uint32_t pixels_total);
+    void do_ui(UIContext* uictx, const uint32_t pixels_raytraced, const uint32_t pixels_total,
+               std::chrono::duration<double> render_time);
 };
 
-void UILogic::do_ui(UIContext* uictx, const uint32_t pixels_raytraced, const uint32_t pixels_total) {
+void UILogic::do_ui(UIContext* uictx, const uint32_t pixels_raytraced, const uint32_t pixels_total,
+                    std::chrono::duration<double> render_time) {
     struct nk_context* ctx = uictx->ctx;
     static nk_colorf bg{.r = 0.10f, .g = 0.18f, .b = 0.24f, .a = 1.0f};
 
@@ -379,7 +381,11 @@ void UILogic::do_ui(UIContext* uictx, const uint32_t pixels_raytraced, const uin
         nk_label_colored(ctx, scratch_buffer, NK_TEXT_ALIGN_LEFT, nk_color{0, 255, 0, 255});
         nk_prog(ctx, g_pixels_processed.load(), pixels_total, false);
 
-        // nk_layout_row_static(ctx, 32, 256, 1);
+        fmt_res = fmt::format_to(scratch_buffer, "Elapsed time: {:%H:%M:%S}", render_time);
+        *fmt_res.out = 0;
+
+        nk_layout_row_static(ctx, 32, 256, 1);
+        nk_label_colored(ctx, scratch_buffer, NK_TEXT_ALIGN_LEFT, nk_color{255, 0, 0, 255});
 
         // for (size_t i = 0, count = draws_data.size(); i < count; ++i) {
         //     auto itr = fmt::format_to_n(scratch_buffer, size(scratch_buffer), "{}", geometry_nodes[i].name);
@@ -535,7 +541,8 @@ public:
     RayTracer(RayTracer&& rhs) noexcept
         : _imgsize{rhs._imgsize}, _pixels_raytraced{rhs._pixels_raytraced}, _poll_count{rhs._poll_count},
           _zmq_context{std::exchange(rhs._zmq_context, nullptr)}, _zmq_poller{std::exchange(rhs._zmq_poller, nullptr)},
-          _workqueue{std::move(rhs._workqueue)}, _worker_context{std::move(rhs._worker_context)} {}
+          _workqueue{std::move(rhs._workqueue)}, _worker_context{std::move(rhs._worker_context)},
+          _start_timepoint{rhs._start_timepoint}, _end_timepoint{rhs._end_timepoint} {}
 
     static tl::optional<RayTracer> create();
     void update(RayTracedImageDisplay* img_output);
@@ -543,6 +550,7 @@ public:
     uint32_t pixels_count() const noexcept { return _imgsize.x * _imgsize.y; }
     uint32_t pixels_raytraced() const noexcept { return _pixels_raytraced; }
     glm::u16vec2 image_size() const noexcept { return _imgsize; }
+    std::chrono::duration<double> render_time() const noexcept { return _end_timepoint - _start_timepoint; }
 
 private:
     glm::u16vec2 _imgsize;
@@ -552,6 +560,10 @@ private:
     void* _zmq_poller;
     std::unique_ptr<MonkaGigaQueue> _workqueue;
     std::vector<RayTracingWorkerContext> _worker_context;
+    std::chrono::time_point<std::chrono::high_resolution_clock> _start_timepoint{
+        std::chrono::high_resolution_clock::now()};
+    std::chrono::time_point<std::chrono::high_resolution_clock> _end_timepoint{
+        std::chrono::high_resolution_clock::now()};
 };
 
 RayTracer::~RayTracer() {
@@ -593,7 +605,13 @@ tl::optional<RayTracer> RayTracer::create() {
     const glm::u16vec2 img_size{rtsetup->rts_img_width, rtsetup->rts_img_height};
     const glm::uvec2 rounded_img_size{round_up<uint32_t>(img_size.x, 8), round_up<uint32_t>(img_size.y, 8)};
 
-    const auto cpus = std::min<uint32_t>(std::thread::hardware_concurrency(), 8);
+    auto cpu_count = std::thread::hardware_concurrency();
+    if (cpu_count > 6) {
+        cpu_count -= 2;
+    }
+    LOG_INFO(g_logger, "Using {} cores", cpu_count);
+
+    const auto cpus = cpu_count;
     constexpr uint32_t BLOCK_SIZE = 8;
 
     const glm::uvec2 pkgs_count = rounded_img_size / uint32_t{8};
@@ -749,6 +767,10 @@ void RayTracer::update(RayTracedImageDisplay* img_output) {
             }
         }
     }
+
+    if (g_pixels_processed <= pixels_count()) {
+        _end_timepoint = std::chrono::high_resolution_clock::now();
+    }
 }
 
 void RayTracer::shutdown() {
@@ -857,7 +879,8 @@ int main(int argc, char** argv) {
 
     window->Events.render_event.bind([main = &main_ctx](const DrawParams& dp) {
         main->raytracer->update(main->img_display);
-        main->ui_logic.do_ui(&main->ui_ctx, main->raytracer->pixels_raytraced(), main->raytracer->pixels_count());
+        main->ui_logic.do_ui(&main->ui_ctx, main->raytracer->pixels_raytraced(), main->raytracer->pixels_count(),
+                             main->raytracer->render_time());
 
         glViewportIndexedf(0, 0.0f, 0.0f, static_cast<float>(dp.surface_width), static_cast<float>(dp.surface_height));
 
@@ -1110,6 +1133,10 @@ int main(int argc, char** argv) {
     //     WRAP_ZMQ_FUNC(zmq_close, ws.z_socket);
     // });
 
+    char tmp_buf[256];
+    auto res = fmt::format_to(tmp_buf,"Total time: {:%H hour(s) :%M minute(s) :%S (seconds)}", raytracer->render_time());
+    *res.out = 0;
+    LOG_INFO(g_logger, "Total time: {}", tmp_buf);
     LOG_INFO(g_logger, "Shutting down");
 
     // if (run_mode == RunMode::Server) {

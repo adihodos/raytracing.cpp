@@ -10,6 +10,9 @@
 #include <iostream>
 #include <ostream>
 
+#include <rfl.hpp>
+#include <rfl/json.hpp>
+
 #include "camera.parameters.hpp"
 #include "random.number.gen.hpp"
 #include "ray.tracer.material.handle.hpp"
@@ -41,22 +44,28 @@ std::tuple<CameraParameters, HittableObject_Collection, MaterialCollection> make
     return std::tuple{camera_params, world, material_coll};
 }
 
-std::tuple<CameraParameters, HittableObject_Collection, MaterialCollection> make_world_spheres() {
-    MaterialCollection material_coll;
-    const MaterialHandleType mtl_ground = material_coll.add(Material::make_lambertian(glm::vec3{0.8f, 0.8f, 0.0f}));
-    const MaterialHandleType mtl_center = material_coll.add(Material::make_lambertian(glm::vec3{0.1f, 0.2f, 0.5f}));
-    const MaterialHandleType mtl_left = material_coll.add(Material::make_dielectric(1.5f));
-    const MaterialHandleType mtl_bubble = material_coll.add(Material::make_dielectric(1.0f / 1.5f));
-    const MaterialHandleType mtl_right = material_coll.add(Material::make_metallic(glm::vec3{0.8f, 0.6f, 0.2f}, 1.0f));
+struct SphereDef {
+    std::array<float, 3> center;
+    float radius;
+};
 
-    HittableObject_Collection world;
-    world.add_object(HittableObject::make_sphere(glm::vec3{0.0f, -100.5f, -1.0f}, 100.0f, mtl_ground));
-    world.add_object(HittableObject::make_sphere(glm::vec3{0.0f, 0.0f, -1.2f}, 0.5f, mtl_center));
-    world.add_object(HittableObject::make_sphere(glm::vec3{-1.0f, 0.0f, -1.0f}, 0.5f, mtl_left));
-    world.add_object(HittableObject::make_sphere(glm::vec3{-1.0f, 0.0f, -1.0f}, 0.4f, mtl_bubble));
-    world.add_object(HittableObject::make_sphere(glm::vec3{1.0f, 0.0f, -1.0f}, 0.5f, mtl_right));
+struct AlbedoMatDef {
+    std::array<float, 3> albedo;
+};
 
-    const auto camera_params = CameraParameters{
+struct DielectricMatDef {
+    float refindex;
+};
+
+struct MetallicMatDef {
+    std::array<float, 3> albedo;
+    float fuzzines;
+};
+
+using MaterialDef = rfl::TaggedUnion<"material_def", AlbedoMatDef, DielectricMatDef, MetallicMatDef>;
+
+struct WorldDefinition {
+    CameraParameters camera{
         .aspect_ratio = 16.0f / 9.0f,
         .image_width = 1200,
         .samples_per_pixel = 100,
@@ -68,18 +77,75 @@ std::tuple<CameraParameters, HittableObject_Collection, MaterialCollection> make
         .lookat = {0.0f, 0.0f, -1.0f},
         .world_up = {0.0f, 1.0f, 0.0f},
     };
+    int32_t a_min{-11};
+    int32_t a_max{11};
+    int32_t b_min{-11};
+    int32_t b_max{11};
+    std::array<float, 3> center{0.2f, 0.9f, 0.2f};
+    std::array<float, 3> center_offset{4.0f, 0.2f, 0.0f};
+    float center_dist_treshold{0.9f};
+    float diffuse_material_treshold{0.85};
+    float metal_material_treshold{0.95};
+    std::vector<std::pair<SphereDef, MaterialDef>> objects{
+        {SphereDef{{0.0f, -1000.0f, 0.0f}, 1000.0f}, AlbedoMatDef{0.5f, 0.5f, 0.5f}},
+        {SphereDef{{0.0f, 1.0f, 0.0f}, 1.0f}, DielectricMatDef{1.5f}},
+        {SphereDef{{-4.0f, -1.0f, 0.0f}, 1.0f}, AlbedoMatDef{0.4f, 0.2f, 0.1f}},
+        {SphereDef{{4.0f, -1.0f, 0.0f}, 1.0f}, AlbedoMatDef{0.7f, 0.6f, 0.5f}},
+    };
+};
 
-    {
-        constexpr size_t flags = yas::mem | yas::text;
-        std::string buf{};
-        yas::save<flags>(buf, camera_params);
+glm::vec3 to_vec3(const std::array<float, 3>& a) noexcept { return glm::vec3{a[0], a[1], a[2]}; }
 
-        std::ofstream urmom{"urmom.txt"};
-        urmom << buf;
-        urmom.flush();
+std::tuple<CameraParameters, HittableObject_Collection, MaterialCollection> make_world_spheres() {
+    MaterialCollection material_coll;
+    HittableObject_Collection world;
+    const WorldDefinition world_def = rfl::json::load<WorldDefinition>("data/config/world.config.json").value();
+
+    for (const auto& [sphere_def, mtl_def] : world_def.objects) {
+        const Material mtl = rfl::visit(
+            [](const auto& mtl_def) {
+                using mat_def_type = std::decay_t<decltype(mtl_def)>;
+                if constexpr (std::is_same_v<mat_def_type, AlbedoMatDef>) {
+                    return Material::make_lambertian(to_vec3(mtl_def.albedo));
+                } else if constexpr (std::is_same_v<mat_def_type, DielectricMatDef>) {
+                    return Material::make_dielectric(mtl_def.refindex);
+                } else if constexpr (std::is_same_v<mat_def_type, MetallicMatDef>) {
+                    return Material::make_metallic(to_vec3(mtl_def.albedo), mtl_def.fuzzines);
+                } else {
+                    static_assert(rfl::always_false_v<mat_def_type>, "Not all cases were covered.");
+                }
+            },
+            mtl_def);
+
+        const MaterialHandleType mtl_handle = material_coll.add(mtl);
+        world.add_object(HittableObject::make_sphere(to_vec3(sphere_def.center), sphere_def.radius, mtl_handle));
     }
 
-    return std::tuple{camera_params, world, material_coll};
+    RandomNumberGenerator rand_gen{};
+    for (int32_t a = world_def.a_min; a < world_def.a_max; ++a) {
+        for (int32_t b = world_def.b_min; b < world_def.b_max; ++b) {
+            const float choose_mat = rand_gen.random_double();
+            const glm::vec3 center{a + 0.9f * rand_gen.random_double(), 0.2f, b + 0.9 * rand_gen.random_double()};
+
+            if ((center - to_vec3(world_def.center_offset)).length() > world_def.center_dist_treshold) {
+                MaterialHandleType mtl_handle;
+
+                if (choose_mat < world_def.diffuse_material_treshold) {
+                    const glm::vec3 color = rand_gen.random_vector(0.0f, 1.0f) * rand_gen.random_vector(0.0f, 1.0f);
+                    mtl_handle = material_coll.add(Material::make_lambertian(color));
+                } else if (choose_mat < world_def.metal_material_treshold) {
+                    mtl_handle = material_coll.add(Material::make_metallic(rand_gen.random_vector(0.5f, 1.0f),
+                                                                           rand_gen.random_double(0.0f, 0.5f)));
+                } else {
+                    mtl_handle = material_coll.add(Material::make_dielectric(rand_gen.random_double(1.2f, 1.6f)));
+                }
+
+                world.add_object(HittableObject::make_sphere(center, 0.2f, mtl_handle));
+            }
+        }
+    }
+
+    return std::tuple{world_def.camera, world, material_coll};
 }
 
 struct CameraFrame {
@@ -114,7 +180,7 @@ std::shared_ptr<RayTracingCore> RayTracingCore::default_setup() {
     const float viewport_width = viewport_height * (static_cast<float>(cam_params.image_width) / image_height);
 
     const CameraFrame cam_frame =
-        make_camera_frame(glm::vec3{-2.0f, 2.0f, 1.0f}, glm::vec3{0.0f, 0.0f, -1.0f}, glm::vec3{0.0f, 1.0f, 0.0f});
+        make_camera_frame(to_vec3(cam_params.lookfrom), to_vec3(cam_params.lookat), to_vec3(cam_params.world_up));
 
     const glm::vec3 viewport_u = cam_frame.U * viewport_width;
     const glm::vec3 viewport_v = -cam_frame.V * viewport_height;
